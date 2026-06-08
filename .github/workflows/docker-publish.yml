@@ -28,5 +28,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/Unipisa/dm-ci:latest
-            ghcr.io/Unipisa/dm-ci:${{ github.sha }}
+            ghcr.io/unipisa/dm-ci:latest
+            ghcr.io/unipisa/dm-ci:${{ github.sha }}
