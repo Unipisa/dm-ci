@@ -1,5 +1,6 @@
 import configparser
-import os
+import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -8,29 +9,52 @@ from fastapi.responses import JSONResponse
 
 CONFIG_PATH = Path(__file__).parent / "config.ini"
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Custom Script Updater")
 
 config = configparser.ConfigParser()
 config.read(CONFIG_PATH)
 
-if "scripts" not in config:
-    raise RuntimeError("config.ini must contain a [scripts] section with API keys and commands")
+if "folders" not in config:
+    raise RuntimeError("config.ini must contain a [folders] section with API keys and project directories")
 
-scripts = dict(config["scripts"])
+folders = dict(config["folders"])
+
+
+def extract_pulled_images(output: str) -> list[str]:
+    images = []
+    for line in output.splitlines():
+        match = re.search(r"(?:Downloaded newer image for|Image is up to date for) ([^\s]+)", line)
+        if match:
+            image_name = match.group(1)
+            if image_name not in images:
+                images.append(image_name)
+            continue
+
+        match = re.search(r"Pulling [^ ]+ \(([^)]+)\)", line)
+        if match:
+            image_name = match.group(1)
+            if image_name not in images:
+                images.append(image_name)
+    return images
 
 
 @app.post("/update")
-async def update(api_key: str = Query(..., description="API key to select the script")):
-    if api_key not in scripts:
+async def update(api_key: str = Query(..., description="API key to select the folder")):
+    if api_key not in folders:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    project_dir = scripts[api_key].strip()
+    project_dir = folders[api_key].strip()
     if not project_dir:
         raise HTTPException(status_code=500, detail="No project directory configured for this API key")
 
     project_path = Path(project_dir)
     if not project_path.is_absolute():
         project_path = (Path(__file__).parent / project_path).resolve()
+
+    logger.info("Updating project folder %s for API key %s", project_path, api_key)
 
     compose_file = project_path / "docker-compose.yml"
     if not compose_file.exists() or not compose_file.is_file():
@@ -57,6 +81,12 @@ async def update(api_key: str = Query(..., description="API key to select the sc
                     "stderr": pull_result.stderr,
                 },
             )
+
+        pulled_images = extract_pulled_images(pull_result.stdout + pull_result.stderr)
+        if pulled_images:
+            logger.info("Pulled images for %s: %s", project_path, ", ".join(pulled_images))
+        else:
+            logger.info("No pulled images detected for %s", project_path)
 
         up_result = subprocess.run(
             ["docker", "compose", "up", "-d"],
