@@ -26,14 +26,7 @@ folders = dict(config["folders"])
 def extract_pulled_images(output: str) -> list[str]:
     images = []
     for line in output.splitlines():
-        match = re.search(r"(?:Downloaded newer image for|Image is up to date for) ([^\s]+)", line)
-        if match:
-            image_name = match.group(1)
-            if image_name not in images:
-                images.append(image_name)
-            continue
-
-        match = re.search(r"Pulling [^ ]+ \(([^)]+)\)", line)
+        match = re.search(r"Image [^ ]+ \(([^)]+)\) Pulled", line)
         if match:
             image_name = match.group(1)
             if image_name not in images:
