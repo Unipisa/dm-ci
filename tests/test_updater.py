@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import tempfile
 import threading
@@ -122,6 +123,40 @@ class UpdateEndpointTests(unittest.TestCase):
         self.assertEqual(perform.call_count, 2)
 
 
+class PullProgressTests(unittest.TestCase):
+    def test_completed_pulls_preserve_order_and_deduplicate(self):
+        events = [
+            {"id": "Image registry.example:5000/app:latest", "status": "Done", "text": "Pulled"},
+            {"id": "Image nginx:latest", "status": "Done", "text": "Pulled"},
+            {"id": "Image registry.example:5000/app:latest", "status": "Done", "text": "Pulled"},
+        ]
+        self.assertEqual(
+            updater.extract_pulled_images("\n".join(map(json.dumps, events))),
+            ["registry.example:5000/app:latest", "nginx:latest"],
+        )
+
+    def test_ignores_non_completed_and_non_image_events(self):
+        events = [
+            {"id": "Image app", "status": "Working", "text": "Pulling"},
+            {"id": "Image app", "status": "Done", "text": "Skipped"},
+            {"id": "Image app", "status": "Error", "text": "Pulled"},
+            {"id": "layer-id", "status": "Done", "text": "Pulled"},
+            {"id": "Image ", "status": "Done", "text": "Pulled"},
+        ]
+        self.assertEqual(updater.extract_pulled_images("\n".join(map(json.dumps, events))), [])
+
+    def test_ignores_invalid_lines_and_unexpected_json_types(self):
+        output = '\n'.join([
+            'time="now" level=warning msg="warning"',
+            '{invalid', 'null', '[]', '42', '{}',
+            '{"id":null,"status":"Done","text":"Pulled"}',
+            '{"id":123,"status":"Done","text":"Pulled"}',
+            '{"id":"Image redis:7","status":"Done","text":"Pulled"}',
+        ])
+        self.assertEqual(updater.extract_pulled_images(output), ["redis:7"])
+        self.assertEqual(updater.extract_pulled_images(""), [])
+
+
 class ComposeExecutionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -130,19 +165,34 @@ class ComposeExecutionTests(unittest.TestCase):
         (path / "docker-compose.yml").write_text("services: {}\n")
         self.job = updater.UpdateJob("test-job", path)
 
-    def test_pull_then_up_with_existing_arguments(self):
+    def test_pull_then_up_with_json_progress(self):
         ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(updater.subprocess, "run", return_value=ok) as run:
             updater.perform_update(self.job)
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
-            [["docker", "compose", "pull"], ["docker", "compose", "up", "-d"]],
+            [["docker", "compose", "--progress", "json", "pull"], ["docker", "compose", "up", "-d"]],
         )
         for call in run.call_args_list:
             self.assertEqual(call.kwargs, {
                 "capture_output": True, "text": True,
                 "cwd": self.job.project_path, "timeout": 600,
             })
+
+    def test_pull_events_from_both_streams_are_logged(self):
+        pull = subprocess.CompletedProcess(
+            [], 0,
+            stdout='{"id":"Image nginx:latest","status":"Done","text":"Pulled"}',
+            stderr='{"id":"Image redis:7","status":"Done","text":"Pulled"}',
+        )
+        up = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch.object(updater.subprocess, "run", side_effect=[pull, up]):
+            with self.assertLogs(updater.logger, level="INFO") as logs:
+                updater.perform_update(self.job)
+        self.assertIn(
+            "completed pull operations for images: nginx:latest, redis:7",
+            "\n".join(logs.output),
+        )
 
     def test_pull_failure_skips_up(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="pull failed")
@@ -160,7 +210,7 @@ class ComposeExecutionTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
 
     def test_timeout_skips_up(self):
-        timeout = subprocess.TimeoutExpired(["docker", "compose", "pull"], 600)
+        timeout = subprocess.TimeoutExpired(["docker", "compose", "--progress", "json", "pull"], 600)
         with patch.object(updater.subprocess, "run", side_effect=timeout) as run:
             with self.assertRaisesRegex(RuntimeError, "timed out"):
                 updater.perform_update(self.job)

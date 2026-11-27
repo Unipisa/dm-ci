@@ -1,7 +1,7 @@
 import asyncio
 import configparser
+import json
 import logging
-import re
 import subprocess
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -33,13 +33,28 @@ class UpdateJob:
 
 
 def extract_pulled_images(output: str) -> list[str]:
+    """Return image references with a completed pull event, not necessarily changed images."""
     images = []
+    seen = set()
     for line in output.splitlines():
-        match = re.search(r"Image [^ ]+ \(([^)]+)\) Pulled", line)
-        if match:
-            image_name = match.group(1)
-            if image_name not in images:
-                images.append(image_name)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        resource = event.get("id")
+        if (
+            not isinstance(resource, str)
+            or not resource.startswith("Image ")
+            or event.get("status") != "Done"
+            or event.get("text") != "Pulled"
+        ):
+            continue
+        image = resource.removeprefix("Image ").strip()
+        if image and image not in seen:
+            seen.add(image)
+            images.append(image)
     return images
 
 
@@ -76,12 +91,12 @@ def perform_update(job: UpdateJob) -> None:
     # The file could have been removed while this job was waiting.
     check_compose_file(job.project_path)
 
-    pull_result = run_compose(job, "pull")
-    pulled_images = extract_pulled_images(pull_result.stdout + pull_result.stderr)
+    pull_result = run_compose(job, "--progress", "json", "pull")
+    pulled_images = extract_pulled_images(pull_result.stdout + "\n" + pull_result.stderr)
     if pulled_images:
-        logger.info("Job %s pulled images: %s", job.job_id, ", ".join(pulled_images))
+        logger.info("Job %s completed pull operations for images: %s", job.job_id, ", ".join(pulled_images))
     else:
-        logger.info("Job %s: no pulled images detected", job.job_id)
+        logger.info("Job %s: no completed image pull events detected", job.job_id)
 
     run_compose(job, "up", "-d")
 

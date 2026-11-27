@@ -34,9 +34,13 @@ and a full queue (or shutdown) returns 503. Requests missing the required
 
 - One in-process FIFO queue holds at most 100 pending jobs, in addition to
   the active job. Duplicate requests are queued independently.
-- A single worker runs `docker compose pull` followed by
+- A single worker runs `docker compose --progress json pull` followed by
   `docker compose up -d` for each project. No two jobs execute concurrently;
   Docker Compose's own internal parallelism is unchanged.
+- The installed Compose CLI must support `--progress json`. Completed image
+  pull events are read from JSON progress output, not terminal text. A
+  completed pull may simply confirm an already up-to-date image; it does not
+  imply a new image was downloaded or a container was recreated.
 - Each command has a 600-second timeout. Failed pulls skip the up command.
   Failures are logged and the next job proceeds; there are no automatic retries.
 - Run only one Uvicorn worker and one updater instance per Docker host.
