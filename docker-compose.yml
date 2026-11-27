@@ -11,3 +11,5 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PYTHONUNBUFFERED=1
+    # An active job may spend up to 600 seconds in each of two commands.
+    stop_grace_period: 21m
